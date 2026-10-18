@@ -4,17 +4,13 @@ import h5py
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
-from sklearn.svm import SVC
-from sklearn.metrics import classification_report, confusion_matrix, f1_score, precision_score, recall_score, precision_recall_curve
-from sklearn.preprocessing import label_binarize
-from itertools import cycle
-
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.metrics import classification_report, confusion_matrix, f1_score, precision_score, recall_score, precision_recall_curve, average_precision_score
 import pickle
 import seaborn as sns
 
 # Define classes and parameters
-#classes = ["dx4e", "dx6i", "MTx", "Nineeg", "Parrot", "q205", "S500", "tello", "WiFi", "wltoys"] #Multi_class Classifcation
-classes = ["drone", "wifi"] # Binary Classification
+classes = ["drone", "wifi"]  # Binary Classification
 num_classes = len(classes)
 
 pca_components = 70
@@ -31,16 +27,15 @@ test_idx = np.array(h5f1['test_idx']).reshape(-1, 1)
 sig_orig_train = np.array(h5f1['sig_origidx_F_train'])
 sig_orig_test = np.array(h5f1['sig_origidx_F_test'])
 X_train = np.array(h5f['X_train'])
-#Y_train = np.array(h5f['Y_train'])
-Y_train= np.array(h5f2['Y_train']) #Binary classification
+Y_train = np.array(h5f2['Y_train'])
 X_test = np.array(h5f['X_test'])
-#Y_test = np.array(h5f['Y_test'])
-Y_test= np.array(h5f2['Y_test']) #Binary classification
+Y_test = np.array(h5f2['Y_test'])
 h5f.close()
 h5f1.close()
 h5f2.close()
 
-Y_train= Y_train[:10500]
+Y_train = Y_train[:10500]
+print("Data loading completed.")
 
 print("--" * 10)
 print("Training data size:", X_train.shape)
@@ -52,7 +47,6 @@ print("Signal origin Test data size:", sig_orig_test.shape)
 print("Test idx data size:", test_idx.shape)
 print("Testing labels size:", Y_test.shape)
 print("--" * 10)
-print("Data loading completed.")
 
 # Convert one-hot encoded labels to class indices if needed
 if Y_train.ndim > 1:
@@ -60,7 +54,7 @@ if Y_train.ndim > 1:
 if Y_test.ndim > 1:
     Y_test = np.argmax(Y_test, axis=1)
 
-def run_experiment(X_train, Y_train, X_test, Y_test, pca_components):
+def run_experiment(X_train, Y_train, X_test, Y_test, pca_components, train_idx, test_idx, sig_orig_train, sig_orig_test):
     print("Starting experiment...")
     # Reshape and apply PCA
     X_train_reshaped = X_train.reshape(X_train.shape[0], -1)
@@ -76,14 +70,22 @@ def run_experiment(X_train, Y_train, X_test, Y_test, pca_components):
     X_train_pca = scaler.fit_transform(X_train_pca)
     X_test_pca = scaler.transform(X_test_pca)
 
-    # Use only PCA output for training and testing
-    print("Using only PCA-transformed features for training and testing...")
-    X_train_combined = X_train_pca
-    X_test_combined = X_test_pca
+    # Scale additional features
+    scaler_train_idx = StandardScaler()
+    scaler_sig_orig = StandardScaler()
+    train_idx_scaled = scaler_train_idx.fit_transform(train_idx)
+    sig_orig_train_scaled = scaler_sig_orig.fit_transform(sig_orig_train)
+    test_idx_scaled = scaler_train_idx.transform(test_idx)
+    sig_orig_test_scaled = scaler_sig_orig.transform(sig_orig_test)
 
-    # Initialize the SVM model
-    print("Initializing SVM model...")
-    model = SVC(probability=True)
+    # Concatenate PCA features with the additional features
+    print("Concatenating PCA-transformed features with additional features...")
+    X_train_combined = np.concatenate((X_train_pca, train_idx_scaled, sig_orig_train_scaled), axis=1)
+    X_test_combined = np.concatenate((X_test_pca, test_idx_scaled, sig_orig_test_scaled), axis=1)
+
+    # Initialize the Decision Tree model
+    print("Initializing Decision Tree model...")
+    model = DecisionTreeClassifier()
 
     # Train the model
     print("Training the model...")
@@ -92,15 +94,15 @@ def run_experiment(X_train, Y_train, X_test, Y_test, pca_components):
     # Validate the model
     print("Validating the model...")
     predictions = model.predict(X_test_combined)
-    report = classification_report(Y_test, predictions)
+    report = classification_report(Y_test, predictions, target_names=classes)
     cm = confusion_matrix(Y_test, predictions)
 
-    # Collect true labels and predicted probabilities for Precision-Recall curve
+    # Collect predicted probabilities for Precision-Recall curve
     y_scores = model.predict_proba(X_test_combined)[:, 1]  # Use probability for the positive class
 
-    f1 = f1_score(Y_test, predictions, average='macro', zero_division=0)
-    precision = precision_score(Y_test, predictions, average='macro', zero_division=0)
-    recall = recall_score(Y_test, predictions, average='macro', zero_division=0)
+    f1 = f1_score(Y_test, predictions, average='binary', zero_division=0)
+    precision = precision_score(Y_test, predictions, average='binary', zero_division=0)
+    recall = recall_score(Y_test, predictions, average='binary', zero_division=0)
     accuracy = np.mean(predictions == Y_test)
 
     history = {
@@ -116,7 +118,7 @@ def run_experiment(X_train, Y_train, X_test, Y_test, pca_components):
 
 # Run the experiment for binary classification
 print("Running the experiment for binary classification...")
-history, model, cm, y_true, y_scores = run_experiment(X_train, Y_train, X_test, Y_test, pca_components)
+history, model, cm, y_true, y_scores = run_experiment(X_train, Y_train, X_test, Y_test, pca_components, train_idx, test_idx, sig_orig_train, sig_orig_test)
 
 # Save the results for binary classification
 print("Saving the results...")
@@ -163,13 +165,15 @@ def plot_results(history, cm, y_true, y_scores, classes):
 
     # Plot Precision-Recall Curve
     precision, recall, _ = precision_recall_curve(y_true, y_scores)
+    average_precision = average_precision_score(y_true, y_scores)
 
     plt.figure()
-    plt.plot(recall, precision, color='b', lw=2)
+    plt.plot(recall, precision, color='b', lw=2, label=f'AP = {average_precision:.2f}')
     plt.xlabel('Recall')
     plt.ylabel('Precision')
-    plt.title('Precision-Recall curve for binary classification')
+    plt.title('Precision-Recall Curve')
     plt.legend(loc="best")
+    plt.grid(True)
     plt.savefig('precision_recall_curve.png')
     plt.close()
 
